@@ -1,0 +1,10 @@
+include(../cmake/directives.cmake)
+
+MyCustomFunction("hello" "cmake")
+
+cmake_minimum_required(VERSION 3.12)
+
+project(MyCppProject)
+
+# Add the executable
+add_executable(my_program main.cpp)
