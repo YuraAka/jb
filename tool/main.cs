@@ -58,7 +58,7 @@ class Program
                 return;
             }
 
-            if (!File.Exists($"{RepoRoot}/jb/sample/{makefile.name}")) {
+            if (!File.Exists($"{RepoRoot}/jb/sample/{makefile.name}.symlink")) {
                 File.CreateSymbolicLink($"{RepoRoot}/jb/sample/{makefile.name}.symlink", $"{JbBuildRoot}/jb/sample/{makefile.name}");
             }
         });
