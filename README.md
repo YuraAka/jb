@@ -7,11 +7,6 @@
 - cmake
 - dotnet
 
-## Install
-To build jb-tool install extra packages:
-- CommandLine
-- YamlDotNet
-
 ## Format
 jb.yaml has following format:
 
