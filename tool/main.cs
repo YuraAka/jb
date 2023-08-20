@@ -3,17 +3,16 @@
 
 /*
 plan:
-    - build exe with deps lib
+    - build exe with sources in subdirs
     - follow recurse if no jb.yaml in children dir
+    - deps for libs recursively go to exe
     - auto name exe/lib (lib with prefix)
     - do not process already built items
     - cross-platform home dir obtain
     - restrict commiting symlinks
 */
 
-using System;
 using System.CommandLine;
-using System.IO;
 using YamlDotNet.Serialization;
 using System.Diagnostics;
 using SmartFormat;
@@ -26,21 +25,21 @@ class TargetSpec
         lib
     }
 
-    public Type type { get; set; }
-    public string name { get; set; }
-    public string[] deps {get; set; }
+    public Type? type { get; set; }
+    public string? name { get; set; }
+    public string[] deps {get; set; } = default!;
 }
 
 class CMakeTemplate
 {
     public class Context
     {
-        public string ProjectName { get; set; }
-        public string BuildRoot { get; set; }
-        public string SrcRoot { get; set; }
+        public string? ProjectName { get; set; }
+        public string? BuildRoot { get; set; }
+        public string? SrcRoot { get; set; }
 
-        public string DepLibNames { get; set; }
-        public string DepLibPaths { get; set; }
+        public string? DepLibNames { get; set; }
+        public string? DepLibPaths { get; set; }
     }
 
     static string ExeTemplate = @"
@@ -209,7 +208,7 @@ class Program
                 //var name = parts[parts.Length - 1];
                 var depSrcDir = Path.Combine(srcRoot, dep);
                 var depTarget = ReadTarget(Path.Combine(depSrcDir, "jb.yaml"));
-                names.Add(depTarget.name);
+                names.Add(depTarget.name!);
                 paths.Add(Path.Combine(BuildRoot, dep));
                 BuildTarget(depTarget, srcRoot, depSrcDir);
             }
