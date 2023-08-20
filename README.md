@@ -20,20 +20,20 @@
 - Windows, Linux (untested)
 
 ## How to use
-1. Build jb-tool:
+1. Build jb-tool (from repo root dir):
 ```
-$ dotnet build
+dotnet build
 ```
 
 2. Build exe2 sample using jb-tool
 ```
-$ cd exe2
-$ jb b
+cd exe2
+jb b
 ```
 
 3. Run built sample
 ```
-$ ./exe2
+./exe2
 ```
 
 4. Make your own projects...

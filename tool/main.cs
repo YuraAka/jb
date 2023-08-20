@@ -3,7 +3,6 @@
 
 /*
 plan:
-    - build from subdir
     - deps for libs recursively go to exe
     - auto name exe/lib (lib with prefix)
     - do not process already built items
