@@ -5,8 +5,11 @@
 
 ## Format
 jb.yaml has following format:
+
+```
 name: <name-of-target>
 type: exe | lib
 deps:
   - path-to-target-from-repo-root-1
   - path-to-target-from-repo-root-2
+```
