@@ -1,78 +1,104 @@
 // dotnet create console -n <name>
 // dotnet build --output ~/.jb/build /p:BaseIntermediateOutputPath=../../.jb/build/
 
+/*
+plan:
+    - build exe with deps lib
+    - follow recurse if no jb.yaml in children dir
+    - auto name exe/lib (lib with prefix)
+    - do not process already built items
+    - cross-platform home dir obtain
+    - restrict commiting symlinks
+*/
+
 using System;
 using System.CommandLine;
 using System.IO;
 using YamlDotNet.Serialization;
 using System.Diagnostics;
+using SmartFormat;
 
-class JbYaml
+class TargetSpec
 {
-    public string type { get; set; }
+    public enum Type
+    {
+        exe,
+        lib
+    }
+
+    public Type type { get; set; }
     public string name { get; set; }
+    public string[] deps {get; set; }
+}
+
+class CMakeTemplate
+{
+    public class Context
+    {
+        public string ProjectName { get; set; }
+        public string BuildRoot { get; set; }
+        public string SrcRoot { get; set; }
+
+        public string DepLibNames { get; set; }
+        public string DepLibPaths { get; set; }
+    }
+
+    static string ExeTemplate = @"
+cmake_minimum_required(VERSION 3.12)
+project({ProjectName})
+file(GLOB SOURCES _/*.cpp _/*.c)
+add_executable({ProjectName} $\{SOURCES\})
+find_library(LIB_DEPS
+    NAMES {DepLibNames}
+    PATHS {DepLibPaths}
+)
+
+target_link_libraries(exe2 PRIVATE $\{LIB_DEPS\})
+target_include_directories({ProjectName} PUBLIC
+    {SrcRoot}
+    $\{CMAKE_CURRENT_SOURCE_DIR\}
+)
+";
+
+    static string LibTemplate = @"
+cmake_minimum_required(VERSION 3.12)
+project({ProjectName})
+file(GLOB SOURCES _/*.cpp _/*.c)
+
+add_library({ProjectName} STATIC $\{SOURCES\})
+target_include_directories({ProjectName} PUBLIC {SrcRoot} $\{CMAKE_CURRENT_SOURCE_DIR\})
+";
+
+    static public string ComposeExe(Context context)
+    {
+        return Smart.Format(ExeTemplate, context);
+    }
+
+    static public string ComposeLib(Context context)
+    {
+        return Smart.Format(LibTemplate, context);
+    }
 }
 
 class Program
 {
     const string JbRoot = "/Users/yuraaka/.jb";
-    const string JbBuildRoot = $"{JbRoot}/build";
+    const string BuildRoot = $"{JbRoot}/build";
 
     static int Main(string[] args)
     {
         var build = new Command("build");
         build.AddAlias("b");
-        build.SetHandler((_) =>
-        {
-            var data = File.ReadAllText("jb.yaml");
-            var deserializer = new DeserializerBuilder().Build();
-            var jbYaml = deserializer.Deserialize<JbYaml>(data);
-            var repoRoot = FindRepositoryRoot();
-            if (repoRoot == null)
-            {
-                Console.WriteLine("outside repository");
-                return;
+        build.SetHandler((_) => {
+            try {
+                Build();
+            } catch (Exception err) {
+                PrintFail(err.Message);
             }
-
-            var sourceDir = Directory.GetCurrentDirectory();
-            var buildDir = MirrorHierarchy(repoRoot, sourceDir, JbBuildRoot);
-            if (!Directory.Exists($"{buildDir}/_"))
-            {
-                File.CreateSymbolicLink($"{buildDir}/_", $"{sourceDir}");
-            }
-
-            GenerateCMakeLists(jbYaml, buildDir);
-            var error = RunExternal("cmake", ".", buildDir);
-            if (error != 0)
-            {
-                Console.WriteLine($"CMake failed with {error}");
-                return;
-            }
-
-            error = RunExternal("make", "", buildDir);
-            if (error != 0)
-            {
-                Console.WriteLine($"Make failed with {error}");
-                return;
-            }
-
-            var binSymlink = Path.Combine(sourceDir, $"{jbYaml.name}");
-            if (File.Exists(binSymlink))
-            {
-                File.Delete(binSymlink);
-            }
-
-            File.CreateSymbolicLink(binSymlink, Path.Combine(buildDir, $"{jbYaml.name}"));
         });
 
         var clean = new Command("clean");
-        clean.SetHandler((_) =>
-        {
-            if (Directory.Exists($"{JbBuildRoot}"))
-            {
-                Directory.Delete($"{JbBuildRoot}", true);
-            }
-        });
+        clean.SetHandler((_) => { Clean();});
 
         var root = new RootCommand();
         root.AddCommand(build);
@@ -81,9 +107,54 @@ class Program
         return root.Invoke(args);
     }
 
-    static string MirrorHierarchy(string repoRoot, string fromDir, string toRoot)
+    static TargetSpec ReadTarget(string path)
     {
-        var relPath = Path.GetRelativePath(repoRoot, fromDir);
+        var data = File.ReadAllText(path);
+        var deserializer = new DeserializerBuilder().Build();
+        return deserializer.Deserialize<TargetSpec>(data);
+    }
+
+    static void Build()
+    {
+        var project = ReadTarget("jb.yaml");
+        var srcRoot = FindRepositoryRoot();
+        if (srcRoot == null)
+        {
+            Console.WriteLine("outside repository");
+            return;
+        }
+
+        var sourceDir = Directory.GetCurrentDirectory();
+        BuildTarget(project, srcRoot, sourceDir);
+        PrintOk();
+    }
+
+    static void PrintOk()
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("Ok");
+        Console.ResetColor();
+    }
+
+    static void PrintFail(string message)
+    {
+        Console.WriteLine(message);
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("Failed");
+        Console.ResetColor();
+    }
+
+    static void Clean()
+    {
+        if (Directory.Exists($"{BuildRoot}"))
+        {
+            Directory.Delete($"{BuildRoot}", true);
+        }
+    }
+
+    static string MirrorHierarchy(string srcRoot, string fromDir, string toRoot)
+    {
+        var relPath = Path.GetRelativePath(srcRoot, fromDir);
         var targetPath = Path.Combine(toRoot, relPath);
         if (!Directory.Exists(targetPath))
         {
@@ -93,18 +164,74 @@ class Program
         return targetPath;
     }
 
-    static void GenerateCMakeLists(JbYaml project, string buildDir)
+    static int BuildTarget(TargetSpec target, string srcRoot, string srcDir, bool makeLink = true)
     {
-        using var writer = File.CreateText($"{buildDir}/CMakeLists.txt");
-        writer.WriteLine($@"
-            cmake_minimum_required(VERSION 3.12)
-            project({project.name})
-            file(GLOB SOURCES _/*.cpp _/*.c)
-            add_executable({project.name} ${{SOURCES}})
-        ");
+        var buildDir = MirrorHierarchy(srcRoot, srcDir, BuildRoot);
+        if (!Directory.Exists($"{buildDir}/_"))
+        {
+            File.CreateSymbolicLink($"{buildDir}/_", $"{srcDir}");
+        }
+
+        GenerateCMakeLists(target, buildDir, srcRoot);
+        RunExternal("cmake", ".", buildDir);
+        RunExternal("cmake", "--build .", buildDir);
+        if (makeLink && target.type == TargetSpec.Type.exe) {
+            // todo problems on Windows? project.name.exe
+            var binSymlink = Path.Combine(srcDir, $"{target.name}");
+            if (File.Exists(binSymlink))
+            {
+                File.Delete(binSymlink);
+            }
+
+            File.CreateSymbolicLink(binSymlink, Path.Combine(buildDir, $"{target.name}"));
+        }
+
+        return 0;
     }
 
-    static int RunExternal(string cmd, string args, string wd)
+    static void GenerateCMakeLists(TargetSpec project, string buildDir, string srcRoot)
+    {
+        using var writer = File.CreateText($"{buildDir}/CMakeLists.txt");
+        var context = new CMakeTemplate.Context
+        {
+            SrcRoot = srcRoot,
+            BuildRoot = BuildRoot,
+            ProjectName = project.name
+        };
+
+        /// todo: expand to dll
+        if (project.deps != null && project.type == TargetSpec.Type.exe) {
+            var names = new List<string>();
+            var paths = new List<string>();
+            foreach (var dep in project.deps)
+            {
+                //var parts = dep.Split('/');
+                //var name = parts[parts.Length - 1];
+                var depSrcDir = Path.Combine(srcRoot, dep);
+                var depTarget = ReadTarget(Path.Combine(depSrcDir, "jb.yaml"));
+                names.Add(depTarget.name);
+                paths.Add(Path.Combine(BuildRoot, dep));
+                BuildTarget(depTarget, srcRoot, depSrcDir);
+            }
+
+            context.DepLibNames = string.Join(" ", names);
+            context.DepLibPaths = string.Join(" ", paths);
+        }
+
+        switch (project.type)
+        {
+            case TargetSpec.Type.exe:
+                writer.WriteLine(CMakeTemplate.ComposeExe(context));
+                break;
+            case TargetSpec.Type.lib:
+                writer.WriteLine(CMakeTemplate.ComposeLib(context));
+                break;
+            default:
+                throw new ArgumentException($"Unknown type: {project.type}");
+        }
+    }
+
+    static void RunExternal(string cmd, string args, string wd)
     {
         ProcessStartInfo external = new ProcessStartInfo
         {
@@ -112,6 +239,7 @@ class Program
             Arguments = args,
             WorkingDirectory = wd,
             RedirectStandardOutput = true,
+            RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
         };
@@ -129,7 +257,11 @@ class Program
 
             // Wait for the process to exit
             process.WaitForExit();
-            return process.ExitCode;
+            if (process.ExitCode != 0) {
+                var error = process.StandardError.ReadToEnd();
+                Console.WriteLine(error);
+                throw new Exception($"Failed to run {cmd} {args} from dir {wd}");
+            }
         }
     }
 
