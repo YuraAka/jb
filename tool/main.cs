@@ -3,7 +3,6 @@
 
 /*
 plan:
-    - default target name
     - build exe with sources in subdirs
     - follow recurse if no jb.yaml in children dir
     - deps for libs recursively go to exe
@@ -39,6 +38,8 @@ class CMakeTemplate
         public string? BuildRoot { get; set; }
         public string? SrcRoot { get; set; }
 
+        public string? SrcPaths { get; set; }
+
         public string? DepLibNames { get; set; }
         public string? DepLibPaths { get; set; }
     }
@@ -46,7 +47,8 @@ class CMakeTemplate
     static string ExeTemplate = @"
 cmake_minimum_required(VERSION 3.12)
 project({ProjectName})
-file(GLOB SOURCES _/*.cpp _/*.c)
+file(GLOB SOURCES {SrcPaths})
+
 add_executable({ProjectName} $\{SOURCES\})
 find_library(LIB_DEPS
     NAMES {DepLibNames}
@@ -84,6 +86,7 @@ class Program
 {
     const string JbRoot = "/Users/yuraaka/.jb";
     const string BuildRoot = $"{JbRoot}/build";
+    const string TargetConfigFileName = "jb.yaml";
 
     static int Main(string[] args)
     {
@@ -121,7 +124,7 @@ class Program
 
     static void Build()
     {
-        var project = ReadTarget("jb.yaml");
+        var project = ReadTarget(TargetConfigFileName);
         var srcRoot = FindRepositoryRoot();
         if (srcRoot == null)
         {
@@ -177,7 +180,7 @@ class Program
             File.CreateSymbolicLink($"{buildDir}/_", $"{srcDir}");
         }
 
-        GenerateCMakeLists(target, buildDir, srcRoot);
+        GenerateCMakeLists(target, buildDir, srcRoot, srcDir);
         RunExternal("cmake", ".", buildDir);
         RunExternal("cmake", "--build .", buildDir);
         if (makeLink && target.type == TargetSpec.Type.exe) {
@@ -194,26 +197,64 @@ class Program
         return 0;
     }
 
-    static void GenerateCMakeLists(TargetSpec target, string buildDir, string srcRoot)
+    static bool IsSymbolicLink(string directoryPath)
+    {
+        FileAttributes attributes = File.GetAttributes(directoryPath);
+        return (attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint;
+    }
+
+    static List<string> CollectProjectSubdirs(string srcDir, bool top)
+    {
+        var result = new List<string>(){srcDir};
+        foreach (string subDir in Directory.GetDirectories(srcDir))
+        {
+            var path = Path.Combine(srcDir, subDir);
+            if (IsSymbolicLink(path)) {
+                // does not follow symlinks
+                continue;
+            }
+
+            if (top || !File.Exists(Path.Combine(path, TargetConfigFileName)))
+            {
+                result.AddRange(CollectProjectSubdirs(path, false));
+            }
+        }
+
+        return result;
+    }
+    static void GenerateCMakeLists(TargetSpec target, string buildDir, string srcRoot, string srcDir)
     {
         using var writer = File.CreateText($"{buildDir}/CMakeLists.txt");
+        string[] srcExts = {"*.cpp", "*.c"};
+        var srcPaths = CollectProjectSubdirs(srcDir, true);
+        List<string> srcPathExts = new List<string>();
+        foreach (var srcPath in srcPaths)
+        {
+            var relSrcPath = Path.GetRelativePath(srcDir, srcPath);
+            foreach (var srcExt in srcExts)
+            {
+                srcPathExts.Add(Path.Combine(relSrcPath, srcExt));
+            }
+        }
+
+        var srcSep = "\n    _/";
         var context = new CMakeTemplate.Context
         {
             SrcRoot = srcRoot,
             BuildRoot = BuildRoot,
+            SrcPaths = srcSep + string.Join(srcSep, srcPathExts) + "\n",
             ProjectName = target.name
         };
 
         /// todo: expand to dll
-        if (target.deps.Length > 0 && target.type == TargetSpec.Type.exe) {
+        if (target.deps.Length > 0 && target.type == TargetSpec.Type.exe)
+        {
             var names = new List<string>();
             var paths = new List<string>();
             foreach (var dep in target.deps)
             {
-                //var parts = dep.Split('/');
-                //var name = parts[parts.Length - 1];
                 var depSrcDir = Path.Combine(srcRoot, dep);
-                var depTarget = ReadTarget(Path.Combine(depSrcDir, "jb.yaml"));
+                var depTarget = ReadTarget(Path.Combine(depSrcDir, TargetConfigFileName));
                 names.Add(depTarget.name!);
                 paths.Add(Path.Combine(BuildRoot, dep));
                 BuildTarget(depTarget, srcRoot, depSrcDir);
