@@ -1,11 +1,23 @@
 # Just Build system
-## Aims
-- Simple use: go to any folder with jb.yaml and invoke `jb build` to build target
-- C++ & C# support
+## Features
+- Simple use: go to any folder in your repository and invoke `jb build` to build target
+- No temporary files in repository -- only one symlink of built target in a project folder
+- Can be run from any directory, even if it does not contain project file jb.yaml
+- Simple minimalistic project file syntax (for static C++ libraries it's sufficient to empy file)
+- C++
+
+## Repository constraints
+- Any folder contains files from one project only
+- No symlinks allowed
+- Repository root folder contains empy .jb.root file
 
 ## Requirements
 - cmake
 - dotnet
+
+## Supported OS
+- MacOS (tested)
+- Windows, Linux (untested)
 
 ## How to use
 1. Build jb-tool:
