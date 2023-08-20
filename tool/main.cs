@@ -3,8 +3,7 @@
 
 /*
 plan:
-    - build exe with sources in subdirs
-    - follow recurse if no jb.yaml in children dir
+    - build from subdir
     - deps for libs recursively go to exe
     - auto name exe/lib (lib with prefix)
     - do not process already built items
@@ -17,7 +16,7 @@ using YamlDotNet.Serialization;
 using System.Diagnostics;
 using SmartFormat;
 
-class TargetSpec
+class ProjectSpec
 {
     public enum Type
     {
@@ -86,7 +85,7 @@ class Program
 {
     const string JbRoot = "/Users/yuraaka/.jb";
     const string BuildRoot = $"{JbRoot}/build";
-    const string TargetConfigFileName = "jb.yaml";
+    const string ProjectConfigFileName = "jb.yaml";
 
     static int Main(string[] args)
     {
@@ -110,11 +109,11 @@ class Program
         return root.Invoke(args);
     }
 
-    static TargetSpec ReadTarget(string path)
+    static ProjectSpec ReadProject(string path)
     {
         var data = File.ReadAllText(path);
         var deserializer = new DeserializerBuilder().Build();
-        var target = deserializer.Deserialize<TargetSpec>(data);
+        var target = deserializer.Deserialize<ProjectSpec>(data);
         if (target.name == null) {
             target.name = Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(path)));
         }
@@ -122,18 +121,28 @@ class Program
         return target;
     }
 
-    static void Build()
+    static string GetProjectDirectory(string dir, string rootDir)
     {
-        var project = ReadTarget(TargetConfigFileName);
-        var srcRoot = FindRepositoryRoot();
-        if (srcRoot == null)
+        string cfgPath = Path.Combine(dir, ProjectConfigFileName);
+        if (Path.Exists(cfgPath))
         {
-            Console.WriteLine("outside repository");
-            return;
+            return dir;
         }
 
-        var sourceDir = Directory.GetCurrentDirectory();
-        BuildTarget(project, srcRoot, sourceDir);
+        if (dir == rootDir)
+        {
+            throw new Exception($"Cannot locate {ProjectConfigFileName} in parent hierarchy");
+        }
+
+        return GetProjectDirectory(Directory.GetParent(dir)!.FullName, rootDir);
+    }
+
+    static void Build()
+    {
+        var srcRoot = GetRepositoryRoot();
+        var srcDir = GetProjectDirectory(Directory.GetCurrentDirectory(), srcRoot);
+        var project = ReadProject(Path.Combine(srcDir, ProjectConfigFileName));
+        BuildProject(project, srcRoot, srcDir);
         PrintOk();
     }
 
@@ -172,7 +181,7 @@ class Program
         return targetPath;
     }
 
-    static int BuildTarget(TargetSpec target, string srcRoot, string srcDir, bool makeLink = true)
+    static int BuildProject(ProjectSpec project, string srcRoot, string srcDir, bool makeLink = true)
     {
         var buildDir = MirrorHierarchy(srcRoot, srcDir, BuildRoot);
         if (!Directory.Exists($"{buildDir}/_"))
@@ -180,18 +189,18 @@ class Program
             File.CreateSymbolicLink($"{buildDir}/_", $"{srcDir}");
         }
 
-        GenerateCMakeLists(target, buildDir, srcRoot, srcDir);
+        GenerateCMakeLists(project, buildDir, srcRoot, srcDir);
         RunExternal("cmake", ".", buildDir);
         RunExternal("cmake", "--build .", buildDir);
-        if (makeLink && target.type == TargetSpec.Type.exe) {
+        if (makeLink && project.type == ProjectSpec.Type.exe) {
             // todo problems on Windows? project.name.exe
-            var binSymlink = Path.Combine(srcDir, $"{target.name}");
+            var binSymlink = Path.Combine(srcDir, $"{project.name}");
             if (File.Exists(binSymlink))
             {
                 File.Delete(binSymlink);
             }
 
-            File.CreateSymbolicLink(binSymlink, Path.Combine(buildDir, $"{target.name}"));
+            File.CreateSymbolicLink(binSymlink, Path.Combine(buildDir, $"{project.name}"));
         }
 
         return 0;
@@ -214,7 +223,7 @@ class Program
                 continue;
             }
 
-            if (top || !File.Exists(Path.Combine(path, TargetConfigFileName)))
+            if (top || !File.Exists(Path.Combine(path, ProjectConfigFileName)))
             {
                 result.AddRange(CollectProjectSubdirs(path, false));
             }
@@ -222,7 +231,7 @@ class Program
 
         return result;
     }
-    static void GenerateCMakeLists(TargetSpec target, string buildDir, string srcRoot, string srcDir)
+    static void GenerateCMakeLists(ProjectSpec project, string buildDir, string srcRoot, string srcDir)
     {
         using var writer = File.CreateText($"{buildDir}/CMakeLists.txt");
         string[] srcExts = {"*.cpp", "*.c"};
@@ -243,37 +252,37 @@ class Program
             SrcRoot = srcRoot,
             BuildRoot = BuildRoot,
             SrcPaths = srcSep + string.Join(srcSep, srcPathExts) + "\n",
-            ProjectName = target.name
+            ProjectName = project.name
         };
 
         /// todo: expand to dll
-        if (target.deps.Length > 0 && target.type == TargetSpec.Type.exe)
+        if (project.deps.Length > 0 && project.type == ProjectSpec.Type.exe)
         {
             var names = new List<string>();
             var paths = new List<string>();
-            foreach (var dep in target.deps)
+            foreach (var dep in project.deps)
             {
                 var depSrcDir = Path.Combine(srcRoot, dep);
-                var depTarget = ReadTarget(Path.Combine(depSrcDir, TargetConfigFileName));
+                var depTarget = ReadProject(Path.Combine(depSrcDir, ProjectConfigFileName));
                 names.Add(depTarget.name!);
                 paths.Add(Path.Combine(BuildRoot, dep));
-                BuildTarget(depTarget, srcRoot, depSrcDir);
+                BuildProject(depTarget, srcRoot, depSrcDir);
             }
 
             context.DepLibNames = string.Join(" ", names);
             context.DepLibPaths = string.Join(" ", paths);
         }
 
-        switch (target.type)
+        switch (project.type)
         {
-            case TargetSpec.Type.exe:
+            case ProjectSpec.Type.exe:
                 writer.WriteLine(CMakeTemplate.ComposeExe(context));
                 break;
-            case TargetSpec.Type.lib:
+            case ProjectSpec.Type.lib:
                 writer.WriteLine(CMakeTemplate.ComposeLib(context));
                 break;
             default:
-                throw new ArgumentException($"Unknown type: {target.type}");
+                throw new ArgumentException($"Unknown type: {project.type}");
         }
     }
 
@@ -311,7 +320,7 @@ class Program
         }
     }
 
-    static string? FindRepositoryRoot()
+    static string GetRepositoryRoot()
     {
         var currentDir = Directory.GetCurrentDirectory();
         while (!File.Exists(Path.Combine(currentDir, ".jb.root")))
@@ -319,7 +328,7 @@ class Program
             var parentDir = Directory.GetParent(currentDir);
             if (parentDir == null)
             {
-                return null;
+                throw new Exception("Outside of repository");
             }
 
             currentDir = parentDir.FullName;

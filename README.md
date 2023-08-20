@@ -7,6 +7,25 @@
 - cmake
 - dotnet
 
+## How to use
+1. Build jb-tool:
+```
+$ dotnet build
+```
+
+2. Build exe2 sample using jb-tool
+```
+$ cd exe2
+$ jb b
+```
+
+3. Run built sample
+```
+$ ./exe2
+```
+
+4. Make your own projects...
+
 ## Format
 jb.yaml has following format:
 
