@@ -3,6 +3,7 @@
 
 /*
 plan:
+    - default target name
     - build exe with sources in subdirs
     - follow recurse if no jb.yaml in children dir
     - deps for libs recursively go to exe
@@ -21,13 +22,13 @@ class TargetSpec
 {
     public enum Type
     {
-        exe,
-        lib
+        lib,    ///< most common case, type may be omitted
+        exe
     }
 
-    public Type? type { get; set; }
+    public Type type { get; set; } = Type.lib;
     public string? name { get; set; }
-    public string[] deps {get; set; } = default!;
+    public string[] deps {get; set; } = new string[0];
 }
 
 class CMakeTemplate
@@ -110,7 +111,12 @@ class Program
     {
         var data = File.ReadAllText(path);
         var deserializer = new DeserializerBuilder().Build();
-        return deserializer.Deserialize<TargetSpec>(data);
+        var target = deserializer.Deserialize<TargetSpec>(data);
+        if (target.name == null) {
+            target.name = Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(path)));
+        }
+
+        return target;
     }
 
     static void Build()
@@ -188,21 +194,21 @@ class Program
         return 0;
     }
 
-    static void GenerateCMakeLists(TargetSpec project, string buildDir, string srcRoot)
+    static void GenerateCMakeLists(TargetSpec target, string buildDir, string srcRoot)
     {
         using var writer = File.CreateText($"{buildDir}/CMakeLists.txt");
         var context = new CMakeTemplate.Context
         {
             SrcRoot = srcRoot,
             BuildRoot = BuildRoot,
-            ProjectName = project.name
+            ProjectName = target.name
         };
 
         /// todo: expand to dll
-        if (project.deps != null && project.type == TargetSpec.Type.exe) {
+        if (target.deps.Length > 0 && target.type == TargetSpec.Type.exe) {
             var names = new List<string>();
             var paths = new List<string>();
-            foreach (var dep in project.deps)
+            foreach (var dep in target.deps)
             {
                 //var parts = dep.Split('/');
                 //var name = parts[parts.Length - 1];
@@ -217,7 +223,7 @@ class Program
             context.DepLibPaths = string.Join(" ", paths);
         }
 
-        switch (project.type)
+        switch (target.type)
         {
             case TargetSpec.Type.exe:
                 writer.WriteLine(CMakeTemplate.ComposeExe(context));
@@ -226,7 +232,7 @@ class Program
                 writer.WriteLine(CMakeTemplate.ComposeLib(context));
                 break;
             default:
-                throw new ArgumentException($"Unknown type: {project.type}");
+                throw new ArgumentException($"Unknown type: {target.type}");
         }
     }
 
