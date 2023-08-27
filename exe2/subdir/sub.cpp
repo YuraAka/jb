@@ -1,3 +1,3 @@
 #include "sub.hpp"
 
-int sub() {456;}
+int sub() { return 456;}
