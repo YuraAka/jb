@@ -2,3 +2,4 @@ type: exe
 name: exe2
 deps:
   - lib1
+  - contrib/boost

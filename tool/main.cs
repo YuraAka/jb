@@ -3,11 +3,12 @@
 
 /*
 plan:
-    - deps for libs recursively go to exe
-        - 2way pass: 1 -- build graph, 2 -- traverse it
     - !!support boost (external libs download via cmake fetch)
         - cmake fetch
         - conan https://github.com/conan-community/conan-boost
+            - how to deal with deps:
+                - special syntax: @boost
+                - ordinary path to some folder with conanfile.txt or so
     - auto name exe/lib (lib with prefix)
     - do not process already built items
     - cross-platform home dir obtain
@@ -24,12 +25,22 @@ class ProjectSpec
     public enum Type
     {
         lib,    ///< most common case, type may be omitted
-        exe
+        exe,
+        ext     ///< external dependency (package)
+    }
+
+    public enum Vendor
+    {
+        conan
     }
 
     public Type type { get; set; } = Type.lib;
     public string? name { get; set; }
     public string[] deps {get; set; } = new string[0];
+
+    public string? version { get; set; }
+
+    public Vendor? vendor{ get; set; }
 }
 
 class CMakeTemplate
@@ -44,6 +55,9 @@ class CMakeTemplate
 
         public string? DepLibNames { get; set; }
         public string? DepLibPaths { get; set; }
+
+        public string? DepPackageNames { get; set; }
+        public string? DepPackagePaths { get; set; }
     }
 
     static string ExeTemplate = @"
@@ -71,7 +85,24 @@ foreach(name path IN ZIP_LISTS lib_names lib_paths)
     endif()
 endforeach()
 
-target_link_libraries(exe2 PRIVATE $\{LIB_DEPS\})
+set(pkg_names {DepPackageNames})
+set(pkg_paths {DepPackagePaths})
+set(CMAKE_PREFIX_PATH {DepPackagePaths})
+
+foreach(name path IN ZIP_LISTS pkg_names pkg_paths)
+    find_package(
+        $\{name\} REQUIRED
+        PATHS $\{path\}
+        NO_DEFAULT_PATH
+    )
+    if (name)
+        list(APPEND LIB_DEPS $\{name\}::$\{name\})
+    else()
+        message(FATAL_ERROR ""$\{name\} not found in path $\{path\}."")
+    endif()
+endforeach()
+
+target_link_libraries({ProjectName} PRIVATE $\{LIB_DEPS\})
 target_include_directories({ProjectName} PUBLIC
     {SrcRoot}
     $\{CMAKE_CURRENT_SOURCE_DIR\}
@@ -95,6 +126,29 @@ target_include_directories({ProjectName} PUBLIC {SrcRoot} $\{CMAKE_CURRENT_SOURC
     static public string ComposeLib(Context context)
     {
         return Smart.Format(LibTemplate, context);
+    }
+}
+
+class ConanTemplate
+{
+    public class Context
+    {
+        public string? Package { get; set; }
+        public string? Version { get; set; }
+    }
+
+    static string PackageTemplate = @"
+[requires]
+{Package}/{Version}
+
+[generators]
+CMakeDeps
+CMakeToolchain
+";
+
+    static public string Compose(Context context)
+    {
+        return Smart.Format(PackageTemplate, context);
     }
 }
 
@@ -356,34 +410,6 @@ class Program
         return root.Invoke(args);
     }
 
-    static ProjectSpec ReadProject(string path)
-    {
-        var data = File.ReadAllText(path);
-        var deserializer = new DeserializerBuilder().Build();
-        var target = deserializer.Deserialize<ProjectSpec>(data);
-        if (target.name == null) {
-            target.name = Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(path)));
-        }
-
-        return target;
-    }
-
-    static string GetProjectDirectory(string dir, string rootDir)
-    {
-        string cfgPath = Path.Combine(dir, ProjectConfigFileName);
-        if (Path.Exists(cfgPath))
-        {
-            return dir;
-        }
-
-        if (dir == rootDir)
-        {
-            throw new Exception($"Cannot locate {ProjectConfigFileName} in parent hierarchy");
-        }
-
-        return GetProjectDirectory(Directory.GetParent(dir)!.FullName, rootDir);
-    }
-
     static void Build(bool verbose)
     {
         var env = Env.CreateOnHome();
@@ -391,6 +417,14 @@ class Program
         var graph = new BuildGraph(curDir, env);
         graph.Traverse(node => {
             var buildDir = env.MirrorSourceToBuild(node.Path);
+            if (node.Project.type == ProjectSpec.Type.ext)
+            {
+                BuildExternal(node);
+                RunExternal("conan", "install . --build=missing", buildDir, verbose);
+                return;
+            }
+
+
             var srcDir = env.GetAbsoluteSourcePath(node.Path);
             if (!Directory.Exists($"{buildDir}/_"))
             {
@@ -398,9 +432,10 @@ class Program
             }
 
             Prepare(node, env);
-            RunExternal("cmake", ".", buildDir, verbose);
+            RunExternal("cmake", ". -DCMAKE_BUILD_TYPE=Release", buildDir, verbose);
             RunExternal("cmake", "--build .", node.BuildPath, verbose);
-            if (node.Project.type == ProjectSpec.Type.exe) {
+            if (node.Project.type == ProjectSpec.Type.exe)
+            {
                 // todo problems on Windows? project.name.exe
                 var binSymlink = Path.Combine(node.SourcePath, $"{node.Project.name}");
                 if (File.Exists(binSymlink))
@@ -413,6 +448,24 @@ class Program
         });
 
         PrintOk();
+    }
+
+    static void BuildExternal(BuildNode node)
+    {
+        if (node.Project.vendor == ProjectSpec.Vendor.conan)
+        {
+            using var writer = File.CreateText($"{node.BuildPath}/conanfile.txt");
+            var conanfile = ConanTemplate.Compose(new ConanTemplate.Context()
+            {
+                Package = node.Project.name!,
+                Version = node.Project.version!,
+            });
+
+            writer.WriteLine(conanfile);
+        }
+
+        // generate conanfile.txt
+        //RunExternal("cmake", ".", buildDir, verbose);
     }
 
     static void PrintOk()
@@ -488,18 +541,29 @@ class Program
         };
 
         /// todo: expand to dll
-        if (node.Dependers.Count > 0 && node.Project.type == ProjectSpec.Type.exe)
+        if (node.Project.type == ProjectSpec.Type.exe)
         {
-            var names = new List<string>();
-            var paths = new List<string>();
+            var libNames = new List<string>();
+            var libPaths = new List<string>();
+            var packageNames = new List<string>();
+            var packagePaths = new List<string>();
             foreach (var depNode in node.CollectTransitiveLibraryDependers())
             {
-                names.Add(depNode.Name);
-                paths.Add(depNode.BuildPath);
+                if (depNode.Project.type == ProjectSpec.Type.ext)
+                {
+                    packageNames.Add(depNode.Name);
+                    packagePaths.Add(depNode.BuildPath);
+                } else
+                {
+                    libNames.Add(depNode.Name);
+                    libPaths.Add(depNode.BuildPath);
+                }
             }
 
-            context.DepLibNames = string.Join(" ", names);
-            context.DepLibPaths = string.Join(" ", paths);
+            context.DepLibNames = string.Join(" ", libNames);
+            context.DepLibPaths = string.Join(" ", libPaths);
+            context.DepPackageNames = string.Join(" ", packageNames);
+            context.DepPackagePaths = string.Join(" ", packagePaths);
         }
 
         switch (node.Project.type)
