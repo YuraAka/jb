@@ -36,6 +36,11 @@ class ProjectSpec
 
     public Type type { get; set; } = Type.lib;
     public string? name { get; set; }
+
+    /// <summary>
+    ///  Conan uses alternative names (aliases) for CMake
+    /// </summary>
+    public string? alias { get; set; }
     public string[] deps {get; set; } = new string[0];
 
     public string? version { get; set; }
@@ -247,6 +252,7 @@ class BuildNode
     public readonly ProjectSpec Project;
 
     public readonly string Name;
+    public readonly string Alias;
 
     public List<BuildNode> Dependers;
 
@@ -266,6 +272,9 @@ class BuildNode
         Name = Project.name != null
             ? Project.name
             : Project.name = System.IO.Path.GetFileName(path);
+        Alias = Project.alias != null
+            ? Project.alias
+            : Name;
     }
 
     public List<BuildNode> CollectTransitiveLibraryDependers()
@@ -551,7 +560,7 @@ class Program
             {
                 if (depNode.Project.type == ProjectSpec.Type.ext)
                 {
-                    packageNames.Add(depNode.Name);
+                    packageNames.Add(depNode.Alias);
                     packagePaths.Add(depNode.BuildPath);
                 } else
                 {

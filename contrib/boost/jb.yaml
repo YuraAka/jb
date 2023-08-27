@@ -1,0 +1,4 @@
+type: ext
+name: boost
+version: 1.83.0
+vendor: conan

@@ -3,3 +3,4 @@ name: exe2
 deps:
   - lib1
   - contrib/boost
+  - contrib/zlib
