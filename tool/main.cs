@@ -1,14 +1,12 @@
 // dotnet create console -n <name>
-// dotnet build --output ~/.jb/build /p:BaseIntermediateOutputPath=../../.jb/build/
+// dotnet build
 
 /*
 plan:
     - !!support boost (external libs download via cmake fetch)
         - cmake fetch
-        - conan https://github.com/conan-community/conan-boost
-            - how to deal with deps:
-                - special syntax: @boost
-                - ordinary path to some folder with conanfile.txt or so
+    - make better intellisence for conan
+        - mb make links in repo root OR in package dir
     - auto name exe/lib (lib with prefix)
     - do not process already built items
     - cross-platform home dir obtain
@@ -157,9 +155,40 @@ CMakeToolchain
     }
 }
 
+class Fs
+{
+    public delegate bool DirectoryVisitor(string path);
+
+    public static void TraverseDirectories(string root, DirectoryVisitor visitor)
+    {
+        var stack = new Stack<string>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            var dir = stack.Pop();
+            if (!visitor(dir))
+            {
+                continue;
+            }
+
+            foreach (string subDir in Directory.GetDirectories(dir))
+            {
+                stack.Push(subDir);
+            }
+        }
+    }
+
+    public static bool IsSymbolicLink(string directoryPath)
+    {
+        FileAttributes attributes = File.GetAttributes(directoryPath);
+        return (attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint;
+    }
+}
+
 class Env
 {
-    public string BuildRoot { get { return $"{ServiceDir}/build"; } }
+    public string ArtifactDir { get { return ","; }}
+    public string BuildRoot { get { return $"{ServiceDir}/build"; }}
     public readonly string SourceRoot;
 
     public static Env CreateOnHome()
@@ -179,20 +208,31 @@ class Env
         return Path.Combine(projectDir, ProjectConfigFileName);
     }
 
-    public string GetProjectDirectory(string curDir)
+    public bool IsProjectRoot(string dir)
     {
-        string cfgPath = GetProjectPath(curDir);
-        if (Path.Exists(cfgPath))
+        string cfgPath = GetProjectPath(dir);
+        return Path.Exists(cfgPath);
+    }
+
+    public (string, bool) GetProjectDirectory(string startDir)
+    {
+        string? curDir = startDir;
+        while (curDir != null)
         {
-            return curDir;
+            if (IsProjectRoot(curDir))
+            {
+                return (curDir, false);
+            }
+
+            if (curDir == SourceRoot)
+            {
+                return (startDir, true);
+            }
+
+            curDir = Directory.GetParent(curDir)?.FullName;
         }
 
-        if (curDir == SourceRoot)
-        {
-            throw new Exception($"Cannot locate {ProjectConfigFileName} in parent hierarchy");
-        }
-
-        return GetProjectDirectory(Directory.GetParent(curDir)!.FullName);
+        throw new Exception($"Neither project file nor source root was found");
     }
 
     public string GetAbsoluteSourcePath(string srcRootRelativePath)
@@ -221,7 +261,24 @@ class Env
         return targetPath;
     }
 
-    string GetSourceRoot()
+    public void LinkArtifacts(string targetPath, string sourceDir)
+    {
+        var artifactDir = Path.Combine(sourceDir, ArtifactDir);
+        if (!Directory.Exists(artifactDir))
+        {
+            Directory.CreateDirectory(artifactDir);
+        }
+
+        var artifactPath = Path.Combine(artifactDir, Path.GetFileName(targetPath));
+        if (File.Exists(artifactPath))
+        {
+            File.Delete(artifactPath);
+        }
+
+        File.CreateSymbolicLink(artifactPath, targetPath);
+    }
+
+    public string GetSourceRoot()
     {
         var currentDir = Directory.GetCurrentDirectory();
         while (!File.Exists(Path.Combine(currentDir, ".jb.root")))
@@ -236,6 +293,11 @@ class Env
         }
 
         return currentDir;
+    }
+
+    public bool IsProjectRootDir(string dir)
+    {
+        return File.Exists(Path.Combine(dir, ProjectConfigFileName));
     }
 
     const string ProjectConfigFileName = "jb.yaml";
@@ -309,33 +371,81 @@ class BuildGraph
     public BuildGraph(string startDir, Env env)
     {
         var targetDep = new Dictionary<string, string>();
-        var entryProjectDir = env.GetProjectDirectory(startDir);
-        var srcDir = env.GetRelativeSourcePath(entryProjectDir);
-        var entryNode = new BuildNode(srcDir, env);
-        var stack = new Stack<BuildNode>();
-        var topoRoots = new Queue<BuildNode>();
-        stack.Push(entryNode);
-        while (stack.Count > 0)
+        var nodeCache = new Dictionary<string, BuildNode>();
+        var entryPoints = new List<string>();
+        var (entryProjectDir, root) = env.GetProjectDirectory(startDir);
+        if (root)
         {
-            var targetNode = stack.Pop();
-            foreach(var depPath in targetNode.Project.deps)
+            Fs.TraverseDirectories(entryProjectDir, (dir) =>
             {
-                var depNode = new BuildNode(depPath, env);
-                if (targetDep.ContainsKey(depNode.Path)) {
-                    /// todo print full cycle
-                    throw new Exception($"Cycle detected: {depNode.Path}");
-                } else {
-                    targetDep[targetNode.Path] = depNode.Path;
+                if (env.IsProjectRoot(dir))
+                {
+                    entryPoints.Add(dir);
+                    return false;
                 }
 
-                targetNode.Dependers.Add(depNode);
-                depNode.Dependees.Add(targetNode);
-                stack.Push(depNode);
-            }
+                return true;
+            });
+        }
+        else
+        {
+            entryPoints.Add(entryProjectDir);
+        }
 
-            if (targetNode.Dependers.Count == 0)
+        var topoRoots = new Queue<BuildNode>();
+        var visited = new HashSet<string>();
+        foreach(var entryPoint in entryPoints)
+        {
+            var stack = new Stack<BuildNode?>();
+            var cycleKeys = new HashSet<string>();
+            var cycleStack = new Stack<string>();
+            var srcDir = env.GetRelativeSourcePath(entryPoint);
+            var entryNode = new BuildNode(srcDir, env);
+            nodeCache.Add(entryNode.Path, entryNode);
+            stack.Push(entryNode);
+            while (stack.Count > 0)
             {
-                topoRoots.Enqueue(targetNode);
+                var targetNode = stack.Pop();
+                if (targetNode == null)
+                {
+                    cycleKeys.Remove(cycleStack.Pop());
+                    continue;
+                }
+
+                if (visited.Contains(targetNode.Path))
+                {
+                    continue;
+                }
+
+                visited.Add(targetNode.Path);
+                cycleStack.Push(targetNode.Path);
+                cycleKeys.Add(targetNode.Path);
+                stack.Push(null); /// children/parent separator
+                foreach(var depPath in targetNode.Project.deps)
+                {
+                    var depNode = nodeCache.GetValueOrDefault(depPath, new BuildNode(depPath, env));
+                    if (cycleKeys.Contains(depPath))
+                    {
+                        var cycle = new List<string>() {depPath};
+                        while(cycleStack.Count > 0)
+                        {
+                            cycle.Add(cycleStack.Pop());
+                        }
+
+                        cycle.Reverse();
+                        var cycleStr = string.Join(" -> ", cycle);
+                        throw new Exception($"Cycle detected: {cycleStr}");
+                    }
+
+                    targetNode.Dependers.Add(depNode);
+                    depNode.Dependees.Add(targetNode);
+                    stack.Push(depNode);
+                }
+
+                if (targetNode.Dependers.Count == 0)
+                {
+                    topoRoots.Enqueue(targetNode);
+                }
             }
         }
 
@@ -380,10 +490,6 @@ class BuildGraph
 
 class Program
 {
-    const string JbRoot = "/Users/yuraaka/.jb";
-    const string BuildRoot = $"{JbRoot}/build";
-    const string ProjectConfigFileName = "jb.yaml";
-
     static int Main(string[] args)
     {
         var verbose = new Option<bool>("--verbose", "Enable verbose output");
@@ -399,16 +505,18 @@ class Program
         }, verbose);
 
         var clean = new Command("clean");
-        clean.SetHandler((_) => { Clean();});
+        clean.SetHandler((_) => {
+            var env = Env.CreateOnHome();
+            Clean(env);
+        });
 
         var graph = new Command("graph");
         graph.SetHandler((_) => {
-            var env = Env.CreateOnHome();
-            var curDir = Directory.GetCurrentDirectory();
-            var graph = new BuildGraph(curDir, env);
-            graph.Traverse(node => {
-                Console.WriteLine(node.Path);
-            });
+            try {
+                Graph();
+            } catch (Exception err) {
+                PrintFail(err.Message);
+            }
         });
 
         var root = new RootCommand();
@@ -446,17 +554,43 @@ class Program
             if (node.Project.type == ProjectSpec.Type.exe)
             {
                 // todo problems on Windows? project.name.exe
-                var binSymlink = Path.Combine(node.SourcePath, $"{node.Project.name}");
-                if (File.Exists(binSymlink))
-                {
-                    File.Delete(binSymlink);
-                }
-
-                File.CreateSymbolicLink(binSymlink, Path.Combine(node.BuildPath, $"{node.Project.name}"));
+                var target = Path.Combine(node.BuildPath, $"{node.Project.name}");
+                env.LinkArtifacts(target, node.SourcePath);
             }
         });
 
         PrintOk();
+    }
+
+    static void Clean(Env env)
+    {
+        var buildRoot = env.BuildRoot;
+        if (Directory.Exists(buildRoot))
+        {
+            Directory.Delete(buildRoot, true);
+        }
+
+        var srcRoot = env.GetSourceRoot();
+        Fs.TraverseDirectories(srcRoot, (dir) =>
+        {
+            var artifactsDir = Path.Combine(dir, env.ArtifactDir);
+            if (Directory.Exists(artifactsDir))
+            {
+                Directory.Delete(artifactsDir, true);
+            }
+
+            return true;
+        });
+    }
+
+    static void Graph()
+    {
+        var env = Env.CreateOnHome();
+        var curDir = Directory.GetCurrentDirectory();
+        var graph = new BuildGraph(curDir, env);
+        graph.Traverse(node => {
+            Console.WriteLine(node.Path);
+        });
     }
 
     static void BuildExternal(BuildNode node)
@@ -472,9 +606,6 @@ class Program
 
             writer.WriteLine(conanfile);
         }
-
-        // generate conanfile.txt
-        //RunExternal("cmake", ".", buildDir, verbose);
     }
 
     static void PrintOk()
@@ -492,35 +623,28 @@ class Program
         Console.ResetColor();
     }
 
-    static void Clean()
-    {
-        if (Directory.Exists($"{BuildRoot}"))
-        {
-            Directory.Delete($"{BuildRoot}", true);
-        }
-    }
-    static bool IsSymbolicLink(string directoryPath)
-    {
-        FileAttributes attributes = File.GetAttributes(directoryPath);
-        return (attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint;
-    }
-
-    static List<string> CollectProjectSubdirs(string srcDir, bool top)
+    static List<string> CollectProjectSubdirs(string srcDir, bool top, Env env)
     {
         var result = new List<string>(){srcDir};
-        foreach (string subDir in Directory.GetDirectories(srcDir))
-        {
-            var path = Path.Combine(srcDir, subDir);
-            if (IsSymbolicLink(path)) {
-                // does not follow symlinks
-                continue;
+        Fs.TraverseDirectories(srcDir, (path) => {
+            if (path == srcDir)
+            {
+                return true;
             }
 
-            if (top || !File.Exists(Path.Combine(path, ProjectConfigFileName)))
-            {
-                result.AddRange(CollectProjectSubdirs(path, false));
+            if (Fs.IsSymbolicLink(path)) {
+                // does not follow symlinks
+                return false;
             }
-        }
+
+            if (!env.IsProjectRootDir(path))
+            {
+                result.Add(path);
+                return true;
+            }
+
+            return false;
+        });
 
         return result;
     }
@@ -529,7 +653,7 @@ class Program
     {
         using var writer = File.CreateText($"{node.BuildPath}/CMakeLists.txt");
         string[] srcExts = {"*.cpp", "*.c"};
-        var srcPaths = CollectProjectSubdirs(node.SourcePath, true);
+        var srcPaths = CollectProjectSubdirs(node.SourcePath, true, env);
         List<string> srcPathExts = new List<string>();
         foreach (var srcPath in srcPaths)
         {
