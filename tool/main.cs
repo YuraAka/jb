@@ -364,82 +364,94 @@ class BuildNode
     }
 }
 
+
+class CycleDetectingDfs
+{
+    public CycleDetectingDfs(BuildNode root, HashSet<string> visited)
+    {
+        DfsStack.Push(root);
+        Visited = visited;
+    }
+
+    public void Push(BuildNode node)
+    {
+        if (CycleKeys.Contains(node.Path))
+        {
+            var cycle = new List<string>() {node.Path};
+            while(CycleStack.Count > 0)
+            {
+                cycle.Add(CycleStack.Pop());
+            }
+
+            cycle.Reverse();
+            var cycleStr = string.Join(" -> ", cycle);
+            throw new Exception($"Cycle detected: {cycleStr}");
+        }
+
+        DfsStack.Push(node);
+    }
+
+    public BuildNode? Pop()
+    {
+        while (DfsStack.Count > 0)
+        {
+            var node = DfsStack.Pop();
+            if (node == null)
+            {
+                CycleKeys.Remove(CycleStack.Pop());
+                continue;
+            }
+
+            if (!Visited.Contains(node.Path))
+            {
+                return node;
+            }
+        }
+
+        return null;
+    }
+
+    public void BeforeChildren(BuildNode parent)
+    {
+        CycleStack.Push(parent.Path);
+        CycleKeys.Add(parent.Path);
+        DfsStack.Push(null); /// children/parent separator
+        Visited.Add(parent.Path);
+    }
+
+    Stack<BuildNode?> DfsStack = new Stack<BuildNode?>();
+    HashSet<string> CycleKeys = new HashSet<string>();
+    Stack<string> CycleStack = new Stack<string>();
+
+    HashSet<string> Visited;
+}
+
 class BuildGraph
 {
     public delegate void Visitor(BuildNode node);
 
     public BuildGraph(string startDir, Env env)
     {
-        var targetDep = new Dictionary<string, string>();
         var nodeCache = new Dictionary<string, BuildNode>();
-        var entryPoints = new List<string>();
-        var (entryProjectDir, root) = env.GetProjectDirectory(startDir);
-        if (root)
-        {
-            Fs.TraverseDirectories(entryProjectDir, (dir) =>
-            {
-                if (env.IsProjectRoot(dir))
-                {
-                    entryPoints.Add(dir);
-                    return false;
-                }
-
-                return true;
-            });
-        }
-        else
-        {
-            entryPoints.Add(entryProjectDir);
-        }
-
+        var entryPoints = CollectEntryDirs(startDir, env);
         var topoRoots = new Queue<BuildNode>();
         var visited = new HashSet<string>();
         foreach(var entryPoint in entryPoints)
         {
-            var stack = new Stack<BuildNode?>();
-            var cycleKeys = new HashSet<string>();
-            var cycleStack = new Stack<string>();
             var srcDir = env.GetRelativeSourcePath(entryPoint);
             var entryNode = new BuildNode(srcDir, env);
             nodeCache.Add(entryNode.Path, entryNode);
-            stack.Push(entryNode);
-            while (stack.Count > 0)
+            var dfs = new CycleDetectingDfs(entryNode, visited);
+            BuildNode? targetNode;
+            while ((targetNode = dfs.Pop()) != null)
             {
-                var targetNode = stack.Pop();
-                if (targetNode == null)
-                {
-                    cycleKeys.Remove(cycleStack.Pop());
-                    continue;
-                }
-
-                if (visited.Contains(targetNode.Path))
-                {
-                    continue;
-                }
-
-                visited.Add(targetNode.Path);
-                cycleStack.Push(targetNode.Path);
-                cycleKeys.Add(targetNode.Path);
-                stack.Push(null); /// children/parent separator
+                dfs.BeforeChildren(targetNode);
                 foreach(var depPath in targetNode.Project.deps)
                 {
                     var depNode = nodeCache.GetValueOrDefault(depPath, new BuildNode(depPath, env));
-                    if (cycleKeys.Contains(depPath))
-                    {
-                        var cycle = new List<string>() {depPath};
-                        while(cycleStack.Count > 0)
-                        {
-                            cycle.Add(cycleStack.Pop());
-                        }
-
-                        cycle.Reverse();
-                        var cycleStr = string.Join(" -> ", cycle);
-                        throw new Exception($"Cycle detected: {cycleStr}");
-                    }
-
+                    dfs.Push(depNode);
                     targetNode.Dependers.Add(depNode);
                     depNode.Dependees.Add(targetNode);
-                    stack.Push(depNode);
                 }
 
                 if (targetNode.Dependers.Count == 0)
@@ -458,6 +470,32 @@ class BuildGraph
         {
             visitor(node);
         }
+    }
+
+    static List<string> CollectEntryDirs(string startDir, Env env)
+    {
+        var result = new List<string>();
+        var (entryProjectDir, root) = env.GetProjectDirectory(startDir);
+        /// todo: support Solution here
+        if (root)
+        {
+            Fs.TraverseDirectories(entryProjectDir, (dir) =>
+            {
+                if (env.IsProjectRoot(dir))
+                {
+                    result.Add(dir);
+                    return false;
+                }
+
+                return true;
+            });
+        }
+        else
+        {
+            result.Add(entryProjectDir);
+        }
+
+        return result;
     }
 
     static List<BuildNode> TopoSort(Queue<BuildNode> queue)
