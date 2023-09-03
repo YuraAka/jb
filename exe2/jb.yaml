@@ -4,3 +4,4 @@ deps:
   - lib1
   - contrib/boost
   - contrib/zlib
+  - contrib/fmt

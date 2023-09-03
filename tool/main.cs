@@ -29,21 +29,28 @@ class ProjectSpec
 
     public enum Vendor
     {
-        conan
+        conan,
+        cppget
     }
 
     public Type type { get; set; } = Type.lib;
     public string? name { get; set; }
 
-    /// <summary>
-    ///  Conan uses alternative names (aliases) for CMake
-    /// </summary>
-    public string? alias { get; set; }
     public string[] deps {get; set; } = new string[0];
 
     public string? version { get; set; }
 
     public Vendor? vendor{ get; set; }
+
+    /// <summary>
+    ///  Conan specifics
+    /// </summary>
+    public string? alias { get; set; }
+
+    /// <summary>
+    ///  CppGet specifics
+    /// </summary>
+    public string? url { get; set; }
 }
 
 class CMakeTemplate
@@ -61,6 +68,9 @@ class CMakeTemplate
 
         public string? DepPackageNames { get; set; }
         public string? DepPackagePaths { get; set; }
+
+        public string? DepFetchNames { get; set; }
+        public string? DepFetchPaths { get; set; }
     }
 
     static string ExeTemplate = @"
@@ -72,7 +82,14 @@ add_executable({ProjectName} $\{SOURCES\})
 
 set(lib_names {DepLibNames})
 set(lib_paths {DepLibPaths})
+set(fetch_names {DepFetchNames})
+set(fetch_paths {DepFetchPaths})
 set(LIB_DEPS)
+
+foreach(name path IN ZIP_LISTS fetch_names fetch_paths)
+    include($\{path\})
+    list(APPEND LIB_DEPS $\{name\}::$\{name\})
+endforeach()
 
 foreach(name path IN ZIP_LISTS lib_names lib_paths)
     find_library(LIB_$\{name\}
@@ -140,6 +157,11 @@ class ConanTemplate
         public string? Version { get; set; }
     }
 
+    static public string Compose(Context context)
+    {
+        return Smart.Format(PackageTemplate, context);
+    }
+
     static string PackageTemplate = @"
 [requires]
 {Package}/{Version}
@@ -148,11 +170,32 @@ class ConanTemplate
 CMakeDeps
 CMakeToolchain
 ";
+}
+
+class CppGetTemplate
+{
+    public class Context
+    {
+        public string? Package { get; set; }
+        public string? Version { get; set; }
+        public string? Url { get; set; }
+    }
 
     static public string Compose(Context context)
     {
         return Smart.Format(PackageTemplate, context);
     }
+
+    static string PackageTemplate = @"
+include(FetchContent)
+cmake_policy(SET CMP0135 NEW)
+FetchContent_Declare(
+    {Package}
+    URL ""{Url}/{Version}.tar.gz""
+)
+
+FetchContent_MakeAvailable({Package})
+";
 }
 
 class Fs
@@ -330,6 +373,8 @@ class BuildNode
 
     public readonly string SourcePath;
     public readonly string BuildPath;
+
+    public readonly string CMakeIncludePath;
     public readonly ProjectSpec Project;
 
     public readonly string Name;
@@ -356,6 +401,8 @@ class BuildNode
         Alias = Project.alias != null
             ? Project.alias
             : Name;
+
+        CMakeIncludePath = System.IO.Path.Combine(BuildPath, $"{Name}.cmake");
     }
 
     public List<BuildNode> CollectTransitiveLibraryDependers()
@@ -645,33 +692,53 @@ class Program
 
     static void BuildExternal(BuildNode node, Env env, bool verbose)
     {
-        if (node.Project.vendor == ProjectSpec.Vendor.conan)
+        switch (node.Project.vendor)
         {
-            BuildConan(node, env, verbose);
-        }
-        else
-        {
-            throw new Exception($"Unknown external vendor: {node.Project.vendor}");
+            case ProjectSpec.Vendor.conan:
+                BuildConan(node, env, verbose);
+                break;
+
+            case ProjectSpec.Vendor.cppget:
+                BuildCppGet(node, env, verbose);
+                break;
+            default:
+                throw new Exception($"Unknown external vendor: {node.Project.vendor}");
         }
     }
 
     static void BuildConan(BuildNode node, Env env, bool verbose)
     {
-        using var writer = File.CreateText($"{node.BuildPath}/conanfile.txt");
         var packageName = node.Project.name!;
         var packageVersion = node.Project.version!;
-        var conanfile = ConanTemplate.Compose(new ConanTemplate.Context()
-        {
-            Package = packageName,
-            Version = packageVersion,
-        });
 
-        writer.WriteLine(conanfile);
+        {
+            using var writer = File.CreateText($"{node.BuildPath}/conanfile.txt");
+            var conanfile = ConanTemplate.Compose(new ConanTemplate.Context()
+            {
+                Package = packageName,
+                Version = packageVersion,
+            });
+
+            writer.WriteLine(conanfile);
+        }
 
         RunExternal("conan", "install . --build=missing", node.BuildPath, verbose);
         var (output, _) = RunExternal("conan", $"cache path {packageName}/{packageVersion}", node.BuildPath, false);
         var srcPath = Path.Combine(Path.GetDirectoryName(output.Trim())!, "s", "src");
         env.LinkArtifacts(srcPath, node.SourcePath);
+    }
+
+    static void BuildCppGet(BuildNode node, Env env, bool verbose)
+    {
+        using var writer = File.CreateText(node.CMakeIncludePath);
+        var cmake = CppGetTemplate.Compose(new CppGetTemplate.Context()
+        {
+            Package = node.Project.name!,
+            Version = node.Project.version!,
+            Url = node.Project.url!
+        });
+
+        writer.WriteLine(cmake);
     }
 
     static void PrintOk()
@@ -746,12 +813,22 @@ class Program
             var libPaths = new List<string>();
             var packageNames = new List<string>();
             var packagePaths = new List<string>();
+            var fetchNames = new List<string>();
+            var fetchPaths = new List<string>();
             foreach (var depNode in node.CollectTransitiveLibraryDependers())
             {
                 if (depNode.Project.type == ProjectSpec.Type.ext)
                 {
-                    packageNames.Add(depNode.Alias);
-                    packagePaths.Add(depNode.BuildPath);
+                    if (File.Exists(depNode.CMakeIncludePath))
+                    {
+                        fetchNames.Add(depNode.Name);
+                        fetchPaths.Add(depNode.CMakeIncludePath);
+                    }
+                    else
+                    {
+                        packageNames.Add(depNode.Alias);
+                        packagePaths.Add(depNode.BuildPath);
+                    }
                 } else
                 {
                     libNames.Add(depNode.Name);
@@ -763,6 +840,8 @@ class Program
             context.DepLibPaths = string.Join(" ", libPaths);
             context.DepPackageNames = string.Join(" ", packageNames);
             context.DepPackagePaths = string.Join(" ", packagePaths);
+            context.DepFetchNames = string.Join(" ", fetchNames);
+            context.DepFetchPaths = string.Join(" ", fetchPaths);
         }
 
         switch (node.Project.type)

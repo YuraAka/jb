@@ -1,0 +1,5 @@
+type: ext
+name: fmt
+url: https://github.com/fmtlib/fmt/archive
+version: 7.1.3
+vendor: cppget
