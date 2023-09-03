@@ -281,12 +281,12 @@ class Env
     public void LinkArtifacts(string targetPath, string sourceDir)
     {
         var artifactDir = Path.Combine(sourceDir, ArtifactDir);
-        /*if (Directory.Exists(targetPath))
+        if (Directory.Exists(targetPath))
         {
             /// link directory target directly to artifact-dir name
             Fs.CreateSymbolicLink(artifactDir, targetPath);
             return;
-        }*/
+        }
 
         if (!Directory.Exists(artifactDir))
         {
