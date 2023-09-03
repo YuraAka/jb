@@ -178,6 +178,23 @@ class Fs
         }
     }
 
+    public static void CreateSymbolicLink(string symlinkPath, string targetPath)
+    {
+        if (File.Exists(symlinkPath) || Directory.Exists(symlinkPath))
+        {
+            if (IsSymbolicLink(symlinkPath))
+            {
+                File.Delete(symlinkPath);
+            }
+            else
+            {
+                throw new Exception($"Cannot create symlink {symlinkPath}: file exists and not a symlink");
+            }
+        }
+
+        File.CreateSymbolicLink(symlinkPath, targetPath);
+    }
+
     public static bool IsSymbolicLink(string directoryPath)
     {
         FileAttributes attributes = File.GetAttributes(directoryPath);
@@ -264,18 +281,20 @@ class Env
     public void LinkArtifacts(string targetPath, string sourceDir)
     {
         var artifactDir = Path.Combine(sourceDir, ArtifactDir);
+        /*if (Directory.Exists(targetPath))
+        {
+            /// link directory target directly to artifact-dir name
+            Fs.CreateSymbolicLink(artifactDir, targetPath);
+            return;
+        }*/
+
         if (!Directory.Exists(artifactDir))
         {
             Directory.CreateDirectory(artifactDir);
         }
 
         var artifactPath = Path.Combine(artifactDir, Path.GetFileName(targetPath));
-        if (File.Exists(artifactPath))
-        {
-            File.Delete(artifactPath);
-        }
-
-        File.CreateSymbolicLink(artifactPath, targetPath);
+        Fs.CreateSymbolicLink(artifactPath, targetPath);
     }
 
     public string GetSourceRoot()
@@ -530,13 +549,14 @@ class Program
 {
     static int Main(string[] args)
     {
+        var env = Env.CreateOnHome();
         var verbose = new Option<bool>("--verbose", "Enable verbose output");
         var build = new Command("build");
         build.AddAlias("b");
         build.AddOption(verbose);
         build.SetHandler((verbose) => {
             try {
-                Build(verbose);
+                Build(env, verbose);
             } catch (Exception err) {
                 PrintFail(err.Message);
             }
@@ -544,14 +564,13 @@ class Program
 
         var clean = new Command("clean");
         clean.SetHandler((_) => {
-            var env = Env.CreateOnHome();
             Clean(env);
         });
 
         var graph = new Command("graph");
         graph.SetHandler((_) => {
             try {
-                Graph();
+                Graph(env);
             } catch (Exception err) {
                 PrintFail(err.Message);
             }
@@ -565,26 +584,21 @@ class Program
         return root.Invoke(args);
     }
 
-    static void Build(bool verbose)
+    static void Build(Env env, bool verbose)
     {
-        var env = Env.CreateOnHome();
         var curDir = Directory.GetCurrentDirectory();
         var graph = new BuildGraph(curDir, env);
         graph.Traverse(node => {
             var buildDir = env.MirrorSourceToBuild(node.Path);
             if (node.Project.type == ProjectSpec.Type.ext)
             {
-                BuildExternal(node);
+                BuildExternal(node, env);
                 RunExternal("conan", "install . --build=missing", buildDir, verbose);
                 return;
             }
 
-
             var srcDir = env.GetAbsoluteSourcePath(node.Path);
-            if (!Directory.Exists($"{buildDir}/_"))
-            {
-                File.CreateSymbolicLink($"{buildDir}/_", $"{srcDir}");
-            }
+            Fs.CreateSymbolicLink(Path.Combine(buildDir, "_"), srcDir);
 
             Prepare(node, env);
             RunExternal("cmake", ". -DCMAKE_BUILD_TYPE=Release", buildDir, verbose);
@@ -621,9 +635,8 @@ class Program
         });
     }
 
-    static void Graph()
+    static void Graph(Env env)
     {
-        var env = Env.CreateOnHome();
         var curDir = Directory.GetCurrentDirectory();
         var graph = new BuildGraph(curDir, env);
         graph.Traverse(node => {
@@ -631,19 +644,37 @@ class Program
         });
     }
 
-    static void BuildExternal(BuildNode node)
+    static void BuildExternal(BuildNode node, Env env)
     {
         if (node.Project.vendor == ProjectSpec.Vendor.conan)
         {
-            using var writer = File.CreateText($"{node.BuildPath}/conanfile.txt");
-            var conanfile = ConanTemplate.Compose(new ConanTemplate.Context()
-            {
-                Package = node.Project.name!,
-                Version = node.Project.version!,
-            });
-
-            writer.WriteLine(conanfile);
+            BuildConan(node, env);
         }
+        else
+        {
+            throw new Exception($"Unknown external vendor: {node.Project.vendor}");
+        }
+    }
+
+    static void BuildConan(BuildNode node, Env env)
+    {
+        using var writer = File.CreateText($"{node.BuildPath}/conanfile.txt");
+        var packageName = node.Project.name!;
+        var packageVersion = node.Project.version!;
+        var conanfile = ConanTemplate.Compose(new ConanTemplate.Context()
+        {
+            Package = packageName,
+            Version = packageVersion,
+        });
+
+        writer.WriteLine(conanfile);
+
+        // todo: install??
+
+        //Fs.IsSymbolicLink
+        var (output, _) = RunExternal("conan", $"cache path {packageName}/{packageVersion}", node.BuildPath, false);
+        var srcPath = Path.Combine(Path.GetDirectoryName(output.Trim())!, "s", "src");
+        env.LinkArtifacts(srcPath, node.SourcePath);
     }
 
     static void PrintOk()
@@ -750,7 +781,7 @@ class Program
         }
     }
 
-    static void RunExternal(string cmd, string args, string wd, bool verbose)
+    static (string, string) RunExternal(string cmd, string args, string wd, bool verbose)
     {
         ProcessStartInfo external = new ProcessStartInfo
         {
@@ -772,18 +803,20 @@ class Program
             }
 
             process.WaitForExit();
+            var output = process.StandardOutput.ReadToEnd();
+            var error = process.StandardError.ReadToEnd();
             if (verbose)
             {
-                string output = process.StandardOutput.ReadToEnd();
                 Console.WriteLine($"Running '{rawCmd}' from '{wd}'");
                 Console.WriteLine(output);
             }
 
             if (process.ExitCode != 0) {
-                var error = process.StandardError.ReadToEnd();
                 Console.WriteLine(error);
                 throw new Exception($"Failed to run '{rawCmd}' from dir {wd}");
             }
+
+            return (output, error);
         }
     }
 }
