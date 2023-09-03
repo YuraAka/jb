@@ -204,7 +204,7 @@ class Fs
 
 class Env
 {
-    public string ArtifactDir { get { return ","; }}
+    public string ArtifactDir { get { return "_"; }}
     public string BuildRoot { get { return $"{ServiceDir}/build"; }}
     public readonly string SourceRoot;
 
@@ -592,8 +592,7 @@ class Program
             var buildDir = env.MirrorSourceToBuild(node.Path);
             if (node.Project.type == ProjectSpec.Type.ext)
             {
-                BuildExternal(node, env);
-                RunExternal("conan", "install . --build=missing", buildDir, verbose);
+                BuildExternal(node, env, verbose);
                 return;
             }
 
@@ -644,11 +643,11 @@ class Program
         });
     }
 
-    static void BuildExternal(BuildNode node, Env env)
+    static void BuildExternal(BuildNode node, Env env, bool verbose)
     {
         if (node.Project.vendor == ProjectSpec.Vendor.conan)
         {
-            BuildConan(node, env);
+            BuildConan(node, env, verbose);
         }
         else
         {
@@ -656,7 +655,7 @@ class Program
         }
     }
 
-    static void BuildConan(BuildNode node, Env env)
+    static void BuildConan(BuildNode node, Env env, bool verbose)
     {
         using var writer = File.CreateText($"{node.BuildPath}/conanfile.txt");
         var packageName = node.Project.name!;
@@ -669,9 +668,7 @@ class Program
 
         writer.WriteLine(conanfile);
 
-        // todo: install??
-
-        //Fs.IsSymbolicLink
+        RunExternal("conan", "install . --build=missing", node.BuildPath, verbose);
         var (output, _) = RunExternal("conan", $"cache path {packageName}/{packageVersion}", node.BuildPath, false);
         var srcPath = Path.Combine(Path.GetDirectoryName(output.Trim())!, "s", "src");
         env.LinkArtifacts(srcPath, node.SourcePath);
